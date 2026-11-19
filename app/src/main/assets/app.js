@@ -1,5 +1,20 @@
 // Curio Voice: free, on-device narration with Kokoro-82M (Apache-2.0) via kokoro-js.
-import { KokoroTTS } from "https://cdn.jsdelivr.net/npm/kokoro-js@1/+esm";
+// The engine is loaded only when needed, from several CDNs, so one failing source can't break the page.
+const ENGINE_SOURCES = [
+  "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm",
+  "https://esm.sh/kokoro-js@1.2.1",
+  "https://esm.run/kokoro-js@1.2.1",
+];
+let KokoroTTS = null;
+async function loadEngine() {
+  if (KokoroTTS) return KokoroTTS;
+  const errors = [];
+  for (const src of ENGINE_SOURCES) {
+    try { setStatus("Loading voice engine..."); const m = await import(src); KokoroTTS = m.KokoroTTS || (m.default && m.default.KokoroTTS); if (KokoroTTS) return KokoroTTS; errors.push(src + ": no KokoroTTS export"); }
+    catch (e) { errors.push(src + ": " + (e && e.message || e)); }
+  }
+  throw new Error("Could not load the voice engine. Check your internet connection.\n" + errors.join("\n"));
+}
 
 const MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const VOICES = [
@@ -60,8 +75,14 @@ async function loadModel() {
       setProg(l / t); setStatus(`Downloading voice model: ${(l / 1e6).toFixed(0)} / ${(t / 1e6).toFixed(0)} MB`);
     }
   };
+  await loadEngine();
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  if (!isMobile && "gpu" in navigator) {
+    try { tts = await KokoroTTS.from_pretrained(MODEL, { dtype: "fp32", device: "webgpu", progress_callback }); setProg(0); setStatus("Voice engine ready (GPU)."); return tts; }
+    catch (e) { console.warn("WebGPU failed, using CPU", e); }
+  }
   tts = await KokoroTTS.from_pretrained(MODEL, { dtype: "q8", device: "wasm", progress_callback });
-  setProg(0);
+  setProg(0); setStatus("Voice engine ready.");
   return tts;
 }
 
@@ -87,6 +108,17 @@ function join(parts, sr, gaps) {
 
 // ---- UI helpers
 const setStatus = (t) => { el.status.textContent = t; };
+let lastError = "";
+function showError(e) {
+  lastError = (e && (e.stack || e.message)) || String(e);
+  el.status.innerHTML = "";
+  const msg = document.createElement("div"); msg.textContent = "Something went wrong: " + ((e && e.message) || e); el.status.appendChild(msg);
+  const b = document.createElement("button"); b.className = "ghost"; b.style.marginTop = "8px"; b.textContent = "Copy error (send it to Claude)";
+  b.onclick = async () => { try { await navigator.clipboard.writeText(navigator.userAgent + "\n" + lastError); b.textContent = "Copied ✓"; } catch { b.textContent = "Select and copy the text above"; } };
+  el.status.appendChild(b); console.error(e);
+}
+addEventListener("error", (ev) => showError(ev.error || ev.message));
+addEventListener("unhandledrejection", (ev) => showError(ev.reason));
 const setProg = (f) => { el.prog.style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + "%"; };
 let wakeLock = null;
 async function keepAwake(on) {
@@ -107,7 +139,7 @@ el.preview.addEventListener("click", async () => {
     const { audio, sr } = await speak("What if the Moon disappeared tonight? Here's what would happen.");
     showResult(toWav(join([audio], sr, [0]), sr), "preview");
     setStatus("Preview ready. Press play.");
-  } catch (e) { setStatus("Error: " + (e.message || e)); console.error(e); }
+  } catch (e) { showError(e); }
   busyUI(false);
 });
 
@@ -134,7 +166,7 @@ el.go.addEventListener("click", async () => {
     showResult(blob, el.name.value || "narration");
     const mins = ((performance.now() - t0) / 60000).toFixed(1);
     setStatus(`Done: ${paras.length} paragraphs in ${mins} min. Tap Save audio.`);
-  } catch (e) { setStatus("Error: " + (e.message || e)); console.error(e); }
+  } catch (e) { showError(e); }
   await keepAwake(false); busyUI(false);
 });
 
